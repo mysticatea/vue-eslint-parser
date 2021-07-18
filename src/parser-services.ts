@@ -57,6 +57,16 @@ export interface ParserServices {
     ): object
 
     /**
+     * Define handlers to traverse the document.
+     * @param documentVisitor The document handlers.
+     * @param options The options. This is optional.
+     */
+    defineDocumentVisitor(
+        documentVisitor: { [key: string]: (...args: any) => void },
+        options?: { triggerSelector: "Program" | "Program:exit" },
+    ): object
+
+    /**
      * Define handlers to traverse custom blocks.
      * @param context The rule context.
      * @param parser The custom parser.
@@ -102,6 +112,8 @@ export function define(
 ): ParserServices {
     const templateBodyEmitters = new Map<string, EventEmitter>()
     const stores = new WeakMap<object, TokenStore>()
+
+    const documentEmitters = new Map<string, EventEmitter>()
 
     const customBlocksEmitters = new Map<
         | ESLintCustomBlockParser["parseForESLint"]
@@ -175,6 +187,63 @@ export function define(
             // Register handlers into the intermediate event emitter.
             for (const selector of Object.keys(templateBodyVisitor)) {
                 emitter.on(selector, templateBodyVisitor[selector])
+            }
+
+            return scriptVisitor
+        },
+
+        /**
+         * Define handlers to traverse the document.
+         * @param documentVisitor The document handlers.
+         * @param options The options. This is optional.
+         */
+        defineDocumentVisitor(
+            documentVisitor: { [key: string]: (...args: any) => void },
+            options?: { triggerSelector: "Program" | "Program:exit" },
+        ): object {
+            const scriptVisitor: { [key: string]: (...args: any) => void } = {}
+            if (!document) {
+                return scriptVisitor
+            }
+
+            const documentTriggerSelector =
+                options?.triggerSelector ?? "Program:exit"
+
+            let emitter = documentEmitters.get(documentTriggerSelector)
+
+            // If this is the first time, initialize the intermediate event emitter.
+            if (emitter == null) {
+                emitter = new EventEmitter()
+                emitter.setMaxListeners(0)
+                documentEmitters.set(documentTriggerSelector, emitter)
+
+                const programExitHandler =
+                    scriptVisitor[documentTriggerSelector]
+                scriptVisitor[documentTriggerSelector] = (node) => {
+                    try {
+                        if (typeof programExitHandler === "function") {
+                            programExitHandler(node)
+                        }
+
+                        // Traverse document.
+                        const generator = new NodeEventGenerator(emitter!, {
+                            visitorKeys: KEYS,
+                            fallback: getFallbackKeys,
+                        })
+                        traverseNodes(document, generator)
+                    } finally {
+                        // eslint-disable-next-line @mysticatea/ts/ban-ts-ignore
+                        // @ts-ignore
+                        scriptVisitor[documentTriggerSelector] =
+                            programExitHandler
+                        documentEmitters.delete(documentTriggerSelector)
+                    }
+                }
+            }
+
+            // Register handlers into the intermediate event emitter.
+            for (const selector of Object.keys(documentVisitor)) {
+                emitter.on(selector, documentVisitor[selector])
             }
 
             return scriptVisitor
@@ -331,14 +400,13 @@ export function define(
          * @returns The token store of template body.
          */
         getTemplateBodyTokenStore(): TokenStore {
-            const ast = rootAST.templateBody
-            const key = ast || stores
+            const key = document || stores
             let store = stores.get(key)
 
             if (!store) {
                 store =
-                    ast != null
-                        ? new TokenStore(ast.tokens, ast.comments)
+                    document != null
+                        ? new TokenStore(document.tokens, document.comments)
                         : new TokenStore([], [])
                 stores.set(key, store)
             }
